@@ -1,0 +1,14 @@
+numpy
+pandas
+torch
+transformers
+pyyaml
+sentencepiece
+accelerate
+datasets
+python-dotenv
+iterative-stratification
+text_unidecode
+spacy
+py-readability-metrics
+language-tool-python
