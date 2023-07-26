@@ -1,137 +1,90 @@
 import torch
-import random
 import numpy as np
-import pandas as pd
 from torch.utils.data import Dataset
-from tqdm.auto import tqdm
-from data_utils import clean_text,get_span_from_text
+from data_utils import preprocess_text, get_span_from_text
 
-## =============================================================================== ##
-class FeedbackDataset(Dataset):
-    def __init__(self,
-                 df,
-                 tokenizer,
-                 max_length,
-                 target = ['cohesion', 'syntax', 'vocabulary', 'phraseology', 'grammar','conventions'],
-                 spans = "",
-                ):
-        
+from collections import defaultdict
+
+
+class CustomDataset(Dataset):
+    def __init__(self, df, tokenizer, args):
         self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.special_tokens = [tokenizer.cls_token_id,
-                               tokenizer.sep_token_id,
-                               tokenizer.pad_token_id,
-                               tokenizer.mask_token_id
-                              ]
-        
-        self.target = target
-        df = self.prepare_df(df)
-        
-        self.items = []
-        self.texts = []
-        self.text_id = []
-        self.targets = []
-        self.spans_offset = []
+        self.max_length = args['max_len']
+        self.text_cols = args['text']
+        self.target = args['target']
+        self.span_cols = args['text']
+        self.span = args['spans']
+        df = self._preprocess(df)
+        self.data = self._prepare_items(df)
+
+    def _prepare_items(self, df):
+        data = defaultdict(list)
+        for k in self.text_cols:
+            tokens = self.tokenizer(
+                df[k],
+                truncation=True,
+                max_length=self.max_length,
+                add_special_tokens=True,
+                return_offsets_mapping=True if k in self.span_cols else False
+            )
+            for key in tokens:
+                if key == 'token_type_ids': continue
+                data[k + '_' + key] = tokens[key]
+            for i in range(len(df[k + '_span_offset'])):
+                span_labels = np.zeros(len(data[k + '_offset_mapping'][i])) - 1
+                for idx, (sp, ep) in enumerate(df[k + '_span_offset'][i]):
+                    for j, (s, e) in enumerate(data[k + '_offset_mapping'][i]):
+                        if min(ep, e) - max(sp, s) > 0:
+                            span_labels[j] = idx + 1
+                data[k + '_span_label'].append(span_labels.tolist())
+        for k in self.target:
+            if not data['label']:
+                data['label'] = [[i] for i in df[k]]
+            else:
+                data['label'] = [data['label'][i] + [df[k][i]] for i in range(len(df[k]))]
+        return data
+
+    def _preprocess(self, df):
+        data = defaultdict(list)
+        self.length = 0
+        for col in df.columns:
+            if col in self.text_cols:
+                df[col] = df[col].astype(str).fillna('').apply(preprocess_text)
+                data[col] += [text for text in df[col]]
+                if col in self.span_cols and self.span:
+                    data[col + '_span_offset'] += get_span_from_text(df[col], self.span)
+                    data[col + '_span_count'] += [len(i) for i in data[col + '_span_offset']]
+            elif col in self.target:
+                data[col] += [i for i in df[col]]
+            self.length = max(self.length, len(df[col]))
+        return data
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        return {
+            k: self.data[k][idx] for k in self.data
+        }
 
 
-        if len(self.tokenizer.encode("\n\n"))==2:
-            df["full_text"] = df['full_text'].transform(lambda x: x.str.replace("\n","[NL]"))
-
-        for text_id,g in df.sort_values(["full_text_len"]).groupby('text_id',sort=False):
-            self.texts.append(g['full_text'].values[0])
-            self.text_id.append(text_id)
-            self.targets.append(g[self.target].values.tolist())
-            if spans!="":
-                self.spans_offset.append(get_span_from_text(g['full_text'].values[0],spans)[1])
-
-        for idx in tqdm(range(len(self.texts))):
-            self.items.append(self.make_one_item(idx))
-    
-        self.df = df
-
-
-    def prepare_df(self,df):
-        df["full_text"] = df['full_text'].astype(str).fillna('').apply(clean_text)
-        if "cohesion" not in df.columns:
-            df[self.target] = 0
-            
-        df['full_text_len'] = df['full_text'].astype(str).fillna('').apply(len)
-
-        return df
-
-    def make_one_item(self,idx):
-
-        encoding = self.tokenizer(
-                                    self.texts[idx],
-                                    truncation=True if self.max_length else False,
-                                    max_length=self.max_length,
-                                    add_special_tokens = True,
-                                    return_offsets_mapping=False if not len(self.spans_offset) else True,
-                                )
-        
-        outputs = dict(**encoding)
-        
-        outputs['label'] = self.targets[idx]*len(outputs['input_ids'])
-
-        if len(self.spans_offset):
-            target_idx = np.zeros(len(outputs['offset_mapping']))-1
-            for lab_id,(start_span, end_span) in enumerate(self.spans_offset[idx]):
-                for i,(s,e) in enumerate(outputs['offset_mapping']):
-                    if min(end_span, e) - max(start_span, s) > 0:
-                        target_idx[i] = lab_id+1
-
-            outputs['span_labels'] = target_idx.tolist()
-        else:
-            outputs['span_labels'] = [1]*len(outputs['input_ids'])
-
-        return outputs
-    
-    def __len__(self) -> int:
-        return len(self.texts)
-    
-    def __getitem__(self,idx):
-        return self.items[idx]
-
-
-class CustomCollator():
-    def __init__(self, tokenizer,num_target=6,inference=False):
+class Collatator:
+    def __init__(self, args, tokenizer, inference=False):
         self.tokenizer = tokenizer
-        self.num_target = num_target
+        self.num_targets = args['num_labels']
         self.inference = inference
 
     def __call__(self, batch):
-        output = dict()
+        cols = batch[0].keys()
+        out = defaultdict(list)
+        for c in cols:
+            if c == 'label' and self.inference or 'offset' in c: continue
+            max_len = max([len(data[c]) for data in batch])
+            pad_token = -1 if 'label' in c else (self.tokenizer.pad_token_id if 'ids' in c else 0)
+            if c != 'label':
+                out[c] = torch.tensor([data[c] + [pad_token] * (max_len - len(data[c])) for data in batch])
+            else:
+                out[c] = torch.tensor(
+                    [data[c] + [[pad_token] * self.num_targets] * (max_len - len(data[c])) for data in batch])
 
-        output["input_ids"] = [sample["input_ids"] for sample in batch]
-        output["attention_mask"] = [sample["attention_mask"] for sample in batch]
-        if not self.inference:
-            output["label"] = [sample["label"] for sample in batch]
-        output["span_labels"] = [sample["span_labels"] for sample in batch]
-
-
-        batch_max = max([len(ids) for ids in output["input_ids"]])
-
-        # add padding
-        if self.tokenizer.padding_side == "right":
-            if not self.inference:
-            
-                output["label"] = [s + (batch_max - len(s)) * [[-1.]*self.num_target] for s in output["label"]]
-            output["input_ids"] = [s + (batch_max - len(s)) * [self.tokenizer.pad_token_id] for s in output["input_ids"]]
-            output["attention_mask"] = [s + (batch_max - len(s)) * [0] for s in output["attention_mask"]]
-            output["span_labels"] = [s + (batch_max - len(s)) * [-1] for s in output["span_labels"]]
-
-        else:
-            if not self.inference:
-                
-                output["label"] = [(batch_max - len(s)) * [[-1.]*self.num_target] + s for s in output["label"]]
-            output["input_ids"] = [(batch_max - len(s)) * [self.tokenizer.pad_token_id] + s for s in output["input_ids"]]
-            output["attention_mask"] = [(batch_max - len(s)) * [0] + s for s in output["attention_mask"]]
-            output["span_labels"] = [(batch_max - len(s)) * [-1] + s for s in output["span_labels"]]
-
-        # convert to tensors
-        output["input_ids"] = torch.tensor(output["input_ids"], dtype=torch.long)
-        output["attention_mask"] = torch.tensor(output["attention_mask"], dtype=torch.long)
-        if not self.inference:
-            output["label"] = torch.tensor(output["label"], dtype=torch.float)
-        output["span_labels"] = torch.tensor(output["span_labels"], dtype=torch.long)
-        return output
+        return out

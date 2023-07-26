@@ -1,56 +1,52 @@
 seed : 42
 model_name : microsoft/deberta-v3-large
-kfold_name : "fold_k_5_seed_42"
-selected_folds : [0,1,2,3,4] 
+kfold_name : "fold_k_4_seed_42"
+selected_folds : [0,1,2,3]
 name : deberta-v3-large
-exp_name : "dv3l-mp-paragraph--01"  
-checkpoints_path : checkpoint/deberta-v3-large/dv3l-mp-sentences--01'  
+exp_name : "dv3l--01"
+checkpoints_path : checkpoint/deberta-v3-large/dv3l--01'
 device : 0
+n_fold: 4
 
 model:
-  target : ['grammar_mistake', 'readability','cohesion', 'syntax', 'vocabulary', 'phraseology', 'grammar','conventions']
-  target_weights : [0.03,0.03,0.18,0.16,0.1,0.16,0.18,0.16]
+  target : ['content', 'wording']
+  text: ['full_text', 'text']
   max_len : 2048
   max_len_eval : 2048
-  loss : FeedbackLoss
+  loss : RMSELoss
   loss_reduction : mean
-  sub_loss : RMSELoss
-  sub_loss_param : 
-    reduction : 'none'
-  pretrained_config : 
-  num_labels : 8
+  pretrained_config :
+  num_labels : 2
   model_name : microsoft/deberta-v3-large
-  spans : "sentences"
+  spans : "sentence"
   pooling_params :
-    pooling_name: MeanPooling
+    pooling_name: Attention
     params : {}
-  spans_pooling_params :
-    pooling_name : AttentionHead
-    params : {}
+
 
 optimizer:
   name : optim.AdamW
-  params : 
-    lr: 4e-6
+  params :
+    lr: 5e-6
     betas: [0.9, 0.98]
     eps: 1e-6
     weight_decay: 0.01
 
 scheduler:
   name: cosine
-  warmup: 0.04
+  warmup: 0.05
 
 train_loader:
   batch_size: 1
   drop_last: true
-  num_workers: 16
+  num_workers: 4
   pin_memory: false
   shuffle: true
 
 val_loader:
   batch_size: 1
   drop_last: false
-  num_workers: 16
+  num_workers: 4
   pin_memory: false
   shuffle: false
 
@@ -62,13 +58,18 @@ trainer:
   grad_clip: true
   max_norm: 10
 
+wandb:
+  use_wandb: true
+  api: ''
+  project_name: ''
+
 callbacks:
   save : true
   es: false
   patience: 0
   verbose_eval: 1
   epoch_pct_eval: 0.1
-  epoch_eval_dist: uniforme
+  epoch_eval_dist: uniform
   metric_track: val_loss
   mode: min
   top_k: 1

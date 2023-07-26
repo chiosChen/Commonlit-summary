@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 
@@ -28,6 +27,7 @@ class MaxPooling(nn.Module):
         max_embeddings, _ = torch.max(embeddings, dim=1)
         return max_embeddings
 
+
 class MinPooling(nn.Module):
     def __init__(self):
         super(MinPooling, self).__init__()
@@ -39,7 +39,8 @@ class MinPooling(nn.Module):
         min_embeddings, _ = torch.min(embeddings, dim=1)
         return min_embeddings
 
-class AttentionHead(nn.Module):
+
+class AttentionPooling(nn.Module):
     def __init__(self, in_features, hidden_dim):
         super().__init__()
         self.in_features = in_features
@@ -72,32 +73,68 @@ class GeMText(nn.Module):
         ret = ret.pow(1/self.p)
         return ret
 
-class NLPPooling(nn.Module):
-    def __init__(self,**kwargs):
+
+class GLUPooling(nn.Module):
+    def __init__(self, in_features, hidden_dim):
+        super().__init__()
+        self.in_features = in_features
+        self.middle_features = hidden_dim
+        self.W = nn.Linear(in_features, hidden_dim)
+        self.U = nn.Linear(in_features, hidden_dim)
+        self.V = nn.Linear(hidden_dim, 1)
+        self.out_features = hidden_dim
+
+    def forward(self, features, attention_mask):
+        score_mask = attention_mask.unsqueeze(-1)
+        gate = torch.sigmoid(self.W(features))
+        attn = self.U(features) * gate
+        score = self.V(attn)
+        score[attention_mask == 0] = -float('inf')
+        score = torch.softmax(score, dim=-1)
+        return torch.sum(score * score_mask * features, dim=1)
+
+
+class LSTMPooling(nn.Module):
+    def __init__(self, in_features, out_features, dropout=0.):
+        super().__init__()
+        self.lstm = nn.LSTM(in_features, out_features, num_layers=1, bidirectional=True)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, features):
+        _, (h, _) = self.lstm(features)
+        return self.dropout(h)
+
+
+class CustomPooling(nn.Module):
+    def __init__(self, **kwargs):
         super().__init__()
         self.__dict__.update(kwargs)
-        if self.pooling_name =="AttentionHead":
-            self.pooler = AttentionHead(self.in_features, self.out_features)
-        elif self.pooling_name not in ("CLS",''):
+        if self.pooling_name == "Attention":
+            self.pooler = AttentionPooling(self.in_features, self.out_features)
+        elif self.pooling_name == "LSTM":
+            self.pooler = LSTMPooling(self.in_features, self.out_features)
+        elif self.pooling_name not in ("CLS", ''):
             self.pooler = eval(self.pooling_name)(**self.params)
 
         print(f'Pooling: {self.pooling_name}')
 
     def forward(self, last_hidden_state, attention_mask):
 
-        if self.pooling_name in ['MeanPooling','MaxPooling','MinPooling']:
+        if self.pooling_name in ['MeanPooling', 'MaxPooling', 'MinPooling']:
             # Pooling between cls and sep / cls and sep embedding are not included
             # last_hidden_state = self.pooler(last_hidden_state[:,1:-1,:],attention_mask[:,1:-1])
-            last_hidden_state = self.pooler(last_hidden_state,attention_mask)
-        elif self.pooling_name=="CLS":
+            last_hidden_state = self.pooler(last_hidden_state, attention_mask)
+        elif self.pooling_name == "CLS":
             # Use only cls embedding
-            last_hidden_state = last_hidden_state[:,0,:]
-        elif self.pooling_name=="GeMText":
+            last_hidden_state = last_hidden_state[:, 0, :]
+        elif self.pooling_name == "GeMText":
             # Use Gem Pooling on all tokens
-            last_hidden_state = self.pooler(last_hidden_state,attention_mask)
-        
-        elif self.pooling_name=="AttentionHead":
-            last_hidden_state = self.pooler(last_hidden_state,attention_mask)
+            last_hidden_state = self.pooler(last_hidden_state, attention_mask)
+
+        elif self.pooling_name == "Attention":
+            last_hidden_state = self.pooler(last_hidden_state, attention_mask)
+        elif self.pooling_name == 'LSTM':
+            last_hidden_state = self.pooler(last_hidden_state)
         else:
             # No pooling
             last_hidden_state = last_hidden_state
